@@ -341,6 +341,11 @@ fn dev_drive_poll() -> Vec<serde_json::Value> {
 }
 
 #[tauri::command]
+fn home_dir() -> Option<String> {
+    std::env::var("HOME").ok().filter(|h| !h.is_empty())
+}
+
+#[tauri::command]
 fn take_launch_file(state: State<'_, AppState>) -> Option<String> {
     state.launch.lock().ok().and_then(|mut l| l.take())
 }
@@ -433,6 +438,7 @@ pub fn run() {
             page_text,
             sandbox_status,
             take_launch_file,
+            home_dir,
             dev_log,
             dev_drive_poll
         ])

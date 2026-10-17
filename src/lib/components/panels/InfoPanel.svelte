@@ -8,7 +8,7 @@
   import Anchor from '@lucide/svelte/icons/anchor';
   import { app } from '../../state.svelte';
   import { copyText, openExternal } from '../../session';
-  import { dirname, formatBytes, plural } from '../../format';
+  import { dirname, formatBytes, plural, prettyPath } from '../../format';
   import type { DocInfo, Link } from '../../types';
 
   let { doc }: { doc: DocInfo } = $props();
@@ -66,7 +66,7 @@
   <section>
     <h3>File</h3>
     <div class="name">{doc.name}</div>
-    <div class="path mono" title={doc.path}>{dirname(doc.path)}</div>
+    <div class="path mono" title={doc.path}>{prettyPath(dirname(doc.path))}</div>
     <div class="row-actions">
       <button class="btn small" onclick={() => copyText(doc.path, 'Path copied')}><Copy size={13} /> Copy path</button>
     </div>

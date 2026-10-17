@@ -23,3 +23,4 @@ export const takeLaunchFile = () => invoke<string | null>('take_launch_file');
 export const expandPaths = (paths: string[]) => invoke<Expanded>('expand_paths', { paths });
 export const checkFile = (path: string) => invoke<CheckResult>('check_file', { path });
 export const finishBatch = () => invoke<void>('finish_batch');
+export const homeDir = () => invoke<string | null>('home_dir');

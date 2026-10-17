@@ -42,3 +42,14 @@ export function dirname(path: string): string {
   const i = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
   return i > 0 ? path.slice(0, i) : '';
 }
+
+let home = '';
+
+export function setHomeDir(dir: string | null | undefined) {
+  home = dir ? dir.replace(/\/+$/, '') : '';
+}
+
+export function prettyPath(path: string): string {
+  if (home && (path === home || path.startsWith(home + '/'))) return '~' + path.slice(home.length);
+  return path;
+}

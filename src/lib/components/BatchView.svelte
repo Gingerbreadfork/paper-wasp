@@ -7,7 +7,7 @@
   import VerdictBadge from './VerdictBadge.svelte';
   import { app } from '../state.svelte';
   import { batchSummary, closeBatch, copyText, countBatch, openPath, pickFolder, stopBatch } from '../session';
-  import { formatBytes, plural } from '../format';
+  import { formatBytes, plural, prettyPath } from '../format';
   import type { BatchItem, BatchState } from '../types';
 
   let { batch }: { batch: BatchState } = $props();
@@ -52,10 +52,10 @@
 
   const folderMode = $derived(batch.source.startsWith('/'));
   function where(it: BatchItem): string {
-    if (!folderMode) return it.dir;
+    if (!folderMode) return prettyPath(it.dir);
     if (it.dir === batch.source) return '';
     const prefix = batch.source.endsWith('/') ? batch.source : batch.source + '/';
-    return it.dir.startsWith(prefix) ? it.dir.slice(prefix.length) + '/' : it.dir;
+    return it.dir.startsWith(prefix) ? it.dir.slice(prefix.length) + '/' : prettyPath(it.dir);
   }
 
   function badgeStatus(it: BatchItem) {
@@ -70,7 +70,7 @@
   <header class="head">
     <div class="title">
       <h1>{batch.running ? 'Checking' : 'Checked'} {plural(batch.total, 'file')}</h1>
-      <p class="source mono" title={batch.source}>{batch.source}</p>
+      <p class="source mono" title={batch.source}>{prettyPath(batch.source)}</p>
     </div>
     <div class="actions">
       {#if batch.running}

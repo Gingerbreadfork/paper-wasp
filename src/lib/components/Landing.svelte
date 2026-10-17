@@ -8,7 +8,7 @@
   import SandboxStrip from './SandboxStrip.svelte';
   import { app } from '../state.svelte';
   import { openPath, pickAndOpen, pickFolder, removeRecent } from '../session';
-  import { dirname, plural, relativeTime } from '../format';
+  import { dirname, plural, prettyPath, relativeTime } from '../format';
 </script>
 
 <section class="landing">
@@ -44,7 +44,7 @@
             <button class="recent" onclick={() => openPath(r.path)} disabled={app.opening}>
               <span class="meta">
                 <span class="name">{r.name}</span>
-                <span class="dir">{dirname(r.path) || 'Unknown folder'}</span>
+                <span class="dir">{prettyPath(dirname(r.path)) || 'Unknown folder'}</span>
               </span>
               <span class="pages num">{r.locked ? 'locked' : plural(r.pages, 'page')}</span>
               <span class="verdict"><VerdictBadge verdict={r.verdict} size="mini" locked={!!r.locked} status={r.verdict ? 'done' : 'idle'} /></span>

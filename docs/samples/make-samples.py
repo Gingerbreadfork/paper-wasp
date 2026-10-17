@@ -33,7 +33,7 @@ open(os.path.join(out, 'hostile-invoice.pdf'), 'wb').write(buf)
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 from reportlab.lib.units import cm
-c = canvas.Canvas(os.path.join(out, 'field-guide.pdf'), pagesize=A4)
+c = canvas.Canvas(os.path.join(out, 'field-guide.pdf'), pagesize=A4, invariant=1)
 c.setTitle('A Field Guide to Paper Wasps')
 c.setAuthor('M. Polistes')
 c.setSubject('Natural history')

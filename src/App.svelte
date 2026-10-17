@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { app } from './lib/state.svelte';
   import { isTauri } from './lib/api';
-  import { closeCurrent, openDropped, openLaunchFile, pickAndOpen, pickFolder, refreshSandbox } from './lib/session';
+  import { closeCurrent, loadHomeDir, openDropped, openLaunchFile, pickAndOpen, pickFolder, refreshSandbox } from './lib/session';
   import { zoomIn, zoomOut } from './lib/zoom';
   import TitleBar from './lib/components/TitleBar.svelte';
   import Landing from './lib/components/Landing.svelte';
@@ -19,6 +19,9 @@
   });
 
   onMount(() => {
+    void loadHomeDir().then(() => {
+      app.recents = [...app.recents];
+    });
     void refreshSandbox();
     void openLaunchFile();
     let unlisten: (() => void) | undefined;

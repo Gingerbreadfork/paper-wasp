@@ -1,8 +1,8 @@
 import { app } from './state.svelte';
-import { checkFile, closeDocument, documentOutline, expandPaths, finishBatch, isTauri, openDocument, sandboxStatus, scanDocument, takeLaunchFile, unlockDocument } from './api';
+import { checkFile, closeDocument, documentOutline, expandPaths, finishBatch, homeDir, isTauri, openDocument, sandboxStatus, scanDocument, takeLaunchFile, unlockDocument } from './api';
 import { forgetRecent, rememberRecent, updateRecent } from './recents';
 import type { BatchItem, DocInfo, Verdict } from './types';
-import { basename, dirname } from './format';
+import { basename, dirname, setHomeDir } from './format';
 
 export async function openPath(path: string, startPage?: number) {
   if (!isTauri) {
@@ -280,6 +280,15 @@ export function countBatch(items: BatchItem[]) {
 
 export function removeRecent(path: string) {
   app.recents = forgetRecent(path);
+}
+
+export async function loadHomeDir() {
+  if (!isTauri) return;
+  try {
+    setHomeDir(await homeDir());
+  } catch {
+    /* paths stay absolute */
+  }
 }
 
 export async function refreshSandbox() {
