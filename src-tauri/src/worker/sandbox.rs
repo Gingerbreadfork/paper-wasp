@@ -4,7 +4,7 @@ use crate::protocol::SandboxStatus;
 
 #[cfg(target_os = "linux")]
 pub fn lock_down() -> SandboxStatus {
-    let mut st = SandboxStatus::default();
+    let mut st = SandboxStatus { platform: "linux".into(), ..Default::default() };
 
     unsafe {
         libc::prctl(libc::PR_SET_DUMPABLE, 0);
@@ -15,14 +15,21 @@ pub fn lock_down() -> SandboxStatus {
     st.no_new_privs = unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0 };
     apply_landlock(&mut st);
     st.seccomp = apply_seccomp(&mut st.notes);
+    st.no_child_processes = st.seccomp;
     st
 }
 
 #[cfg(not(target_os = "linux"))]
 pub fn lock_down() -> SandboxStatus {
+    let platform = if cfg!(windows) { "windows" } else { std::env::consts::OS };
     SandboxStatus {
+        platform: platform.into(),
         landlock: "unavailable".into(),
-        notes: vec!["Process sandboxing is only implemented on Linux.".into()],
+        notes: if cfg!(windows) {
+            vec!["File and network isolation are not available on Windows yet.".into()]
+        } else {
+            vec!["Process sandboxing is only implemented on Linux.".into()]
+        },
         ..Default::default()
     }
 }

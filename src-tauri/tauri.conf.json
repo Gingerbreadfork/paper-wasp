@@ -26,7 +26,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; img-src 'self' wasp: data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost"
+      "csp": "default-src 'self'; img-src 'self' wasp: http://wasp.localhost data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost"
     }
   },
   "bundle": {
@@ -34,7 +34,8 @@
     "targets": [
       "deb",
       "rpm",
-      "appimage"
+      "appimage",
+      "nsis"
     ],
     "category": "Productivity",
     "shortDescription": "A PDF reader that doesn't trust the document.",
@@ -66,6 +67,13 @@
         "description": "PDF document",
         "role": "Viewer"
       }
-    ]
+    ],
+    "publisher": "Paper Wasp",
+    "homepage": "https://github.com/Gingerbreadfork/paper-wasp",
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
   }
 }

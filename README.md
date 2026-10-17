@@ -110,6 +110,12 @@ killed and replaced, the document is reloaded into the new one, and the request 
 The start page and the Security panel show which layers are active. On a kernel without Landlock
 the app still works and says so.
 
+On Windows the worker is placed in a job object that caps its memory, stops it from creating any
+other process, and keeps it away from the desktop and clipboard. That is less than Landlock and
+seccomp give on Linux: the worker can still open files and reach the network, and the Security
+panel says so. The rest of the design holds on both: pixels in, no script engine, memory-safe
+parsing.
+
 The window never sees PDF bytes. Pages arrive as images over an internal `wasp://` protocol, text
 for search and selection arrives as plain strings with coordinates, and the report is structured
 data. The webview's content security policy allows nothing else.
@@ -146,33 +152,44 @@ payload is a few bytes of text.
 
 ## Install
 
-Packages are not published yet. Building them takes one command once the prerequisites below are in
-place, and writes an `.rpm`, a `.deb` and an `.AppImage` to `src-tauri/target/release/bundle/`:
+Packages for each release are on the [Releases page](https://github.com/Gingerbreadfork/paper-wasp/releases):
+an `.rpm` for Fedora and friends, a `.deb` for Ubuntu and Debian, an `.AppImage` that runs anywhere,
+and a `-setup.exe` installer for 64-bit Windows 10 and 11, with a `SHA256SUMS` file alongside each.
 
 ```sh
-pnpm install
-pnpm tauri build
-sudo dnf install ./src-tauri/target/release/bundle/rpm/Paper\ Wasp-*.rpm      # Fedora
-sudo apt install ./src-tauri/target/release/bundle/deb/Paper\ Wasp_*.deb      # Ubuntu, Debian
+sudo dnf install ./Paper-Wasp-<version>-1.x86_64.rpm     # Fedora
+sudo apt install ./Paper-Wasp_<version>_amd64.deb        # Ubuntu, Debian
+chmod +x Paper-Wasp_<version>_amd64.AppImage && ./Paper-Wasp_<version>_amd64.AppImage
 ```
 
-The packages install the launcher entry, icons and the `application/pdf` association, so Paper
-Wasp appears under Open with for any PDF. The AppImage runs anywhere without installing.
+The Linux packages install the launcher entry, icons and the `application/pdf` association, so
+Paper Wasp appears under Open with for any PDF.
 
-### From source, for your user only
+On Windows, run `Paper-Wasp_<version>_x64-setup.exe`. It installs for your user only, with no
+administrator prompt, and adds Paper Wasp to the Start menu. The installer carries no paid code
+signing certificate, so SmartScreen may say the publisher is unknown: choose More info, then Run
+anyway. The Windows build keeps the separate worker process, the memory cap and the rule that the
+worker cannot start other programs, all enforced through a job object. File and network isolation
+for the worker are Linux-only so far, and the Security panel says which layers are active.
 
-You need Node 20 or newer, [pnpm](https://pnpm.io), a Rust toolchain, and the WebKitGTK
+### From source
+
+You need Node 20 or newer, [pnpm](https://pnpm.io), a Rust toolchain, and on Linux the WebKitGTK
 development packages that [Tauri 2 requires](https://v2.tauri.app/start/prerequisites/#linux).
 
 ```sh
 git clone https://github.com/Gingerbreadfork/paper-wasp
 cd paper-wasp
 pnpm install
-./install.sh --build
+./install.sh --build      # Linux: builds and installs under ~/.local, no root needed
+pnpm tauri build          # or just build the packages into src-tauri/target/release/bundle/
 ```
 
-`install.sh` builds the release binary and installs it under `~/.local` with a launcher entry and
-icons, no root needed. Pass `--default` as well to make Paper Wasp the default PDF application.
+`install.sh` installs a launcher entry and icons alongside the binary. Pass `--default` as well to
+make Paper Wasp the default PDF application. On Windows you need the Visual Studio Build Tools with
+the "Desktop development with C++" workload, as the
+[Tauri prerequisites](https://v2.tauri.app/start/prerequisites/#windows) describe; `pnpm tauri build`
+then writes the installer to `src-tauri\target\release\bundle\nsis\`.
 
 ## Using it
 
@@ -251,6 +268,7 @@ paths.
 - Fill forms, annotate, print or edit. Other tools do those well, and each is a reason to trust the
   file more than Paper Wasp wants to.
 - Open files over 512 MB.
+- Isolate the worker from files and the network on Windows. Only Linux has that today.
 - Run on Android yet. Tauri 2 can build for it and the renderer is pure Rust, but the worker
   process and sandbox would need an Android-specific design.
 
@@ -279,6 +297,15 @@ loads a document; `render`, `scan`, `outline` and `text` then work on it.
 
 `docs/samples/make-samples.py` rebuilds the sample PDFs; it needs `reportlab`, and `pypdf` for the
 locked copy.
+
+### Releasing
+
+Pushing a tag like `v0.2.0` runs the release workflow, which checks the frontend and the Rust
+crate, builds the Linux packages and the Windows installer, and attaches them with checksums to a
+draft GitHub release for you to publish. The tag has to match the version in `package.json`,
+`src-tauri/tauri.conf.json` and `src-tauri/Cargo.toml`; `./scripts/check-version.sh` tells you
+whether the three agree. Running the workflow by hand from the Actions tab builds the same packages
+and keeps them as workflow artifacts without making a release.
 
 ## License
 

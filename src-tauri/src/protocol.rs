@@ -48,10 +48,14 @@ pub struct LoadInfo {
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct SandboxStatus {
+    #[serde(default)]
+    pub platform: String,
     pub landlock: String,
     pub seccomp: bool,
     pub network_isolated: bool,
     pub no_new_privs: bool,
+    #[serde(default)]
+    pub no_child_processes: bool,
     pub memory_cap_mb: u64,
     pub fs_locked: bool,
     pub notes: Vec<String>,

@@ -10,8 +10,8 @@
       { label: 'separate process', on: true },
       { label: s.fs_locked ? 'no file access' : 'file access not restricted', on: s.fs_locked },
       { label: s.network_isolated ? 'no network' : 'network not isolated', on: s.network_isolated },
-      { label: s.seccomp ? 'no program launches' : 'syscall filter off', on: s.seccomp },
-      { label: `${(s.memory_cap_mb / 1024).toFixed(0)} GB memory cap`, on: s.memory_cap_mb > 0 }
+      { label: s.no_child_processes ? 'no program launches' : 'program launches not blocked', on: s.no_child_processes },
+      { label: s.memory_cap_mb > 0 ? `${(s.memory_cap_mb / 1024).toFixed(0)} GB memory cap` : 'no memory cap', on: s.memory_cap_mb > 0 }
     ];
     return out;
   });

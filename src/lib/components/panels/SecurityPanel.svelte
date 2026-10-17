@@ -70,17 +70,38 @@
 
   const layers = $derived.by(() => {
     const s = app.sandbox;
-    const gb = s ? (s.memory_cap_mb / 1024).toFixed(0) : '2';
+    const windows = s?.platform === 'windows';
+    const gb = s && s.memory_cap_mb > 0 ? (s.memory_cap_mb / 1024).toFixed(0) : '2';
     return [
       { label: 'Separate process', ok: true, detail: 'Parsing and drawing happen in a worker that never touches this window.' },
       {
         label: 'No file access',
         ok: s?.fs_locked ?? false,
-        detail: s?.landlock === 'partial' ? 'Landlock is only partly enforced on this kernel.' : 'Landlock denies every file open, read and write.'
+        detail: windows
+          ? 'Not available on Windows yet.'
+          : s?.landlock === 'partial'
+            ? 'Landlock is only partly enforced on this kernel.'
+            : 'Landlock denies every file open, read and write.'
       },
-      { label: 'No network', ok: s?.network_isolated ?? false, detail: 'The worker lives in an empty network namespace.' },
-      { label: 'No program launches', ok: s?.seccomp ?? false, detail: 'A seccomp filter blocks exec, sockets and tracing.' },
-      { label: `${gb} GB memory cap`, ok: (s?.memory_cap_mb ?? 0) > 0, detail: 'Decompression bombs hit the limit and the worker restarts.' },
+      {
+        label: 'No network',
+        ok: s?.network_isolated ?? false,
+        detail: windows ? 'Not available on Windows yet.' : 'The worker lives in an empty network namespace.'
+      },
+      {
+        label: 'No program launches',
+        ok: s?.no_child_processes ?? false,
+        detail: windows
+          ? 'A job object stops the worker from starting any other process.'
+          : 'A seccomp filter blocks exec, sockets and tracing.'
+      },
+      {
+        label: `${gb} GB memory cap`,
+        ok: (s?.memory_cap_mb ?? 0) > 0,
+        detail: windows
+          ? 'A job object caps the worker; past the limit it is killed and restarted.'
+          : 'Decompression bombs hit the limit and the worker restarts.'
+      },
       { label: 'No script engine', ok: true, detail: 'There is nothing in Paper Wasp that can run JavaScript.' },
       { label: 'Memory-safe parser', ok: true, detail: 'Pure Rust, with unsafe code forbidden in the PDF stack.' }
     ];

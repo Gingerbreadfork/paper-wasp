@@ -47,25 +47,119 @@ enum Frame {
     Eof,
 }
 
+#[cfg(windows)]
+mod job {
+    use std::os::windows::io::AsRawHandle;
+    use std::process::Child;
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicUIRestrictions,
+        JobObjectExtendedLimitInformation, SetInformationJobObject, JOBOBJECT_BASIC_UI_RESTRICTIONS,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
+        JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOB_OBJECT_LIMIT_PROCESS_MEMORY, JOB_OBJECT_UILIMIT_DESKTOP, JOB_OBJECT_UILIMIT_DISPLAYSETTINGS,
+        JOB_OBJECT_UILIMIT_EXITWINDOWS, JOB_OBJECT_UILIMIT_GLOBALATOMS, JOB_OBJECT_UILIMIT_HANDLES,
+        JOB_OBJECT_UILIMIT_READCLIPBOARD, JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS,
+        JOB_OBJECT_UILIMIT_WRITECLIPBOARD,
+    };
+
+    pub const MEMORY_CAP_BYTES: usize = 2 * 1024 * 1024 * 1024;
+
+    pub struct Job(HANDLE);
+
+    unsafe impl Send for Job {}
+
+    impl Drop for Job {
+        fn drop(&mut self) {
+            unsafe {
+                CloseHandle(self.0);
+            }
+        }
+    }
+
+    pub fn confine(child: &Child) -> Result<Job, String> {
+        unsafe {
+            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if job.is_null() {
+                return Err("CreateJobObject failed".into());
+            }
+            let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+                | JOB_OBJECT_LIMIT_PROCESS_MEMORY
+                | JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION
+                | JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
+            limits.BasicLimitInformation.ActiveProcessLimit = 1;
+            limits.ProcessMemoryLimit = MEMORY_CAP_BYTES;
+            let ok = SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                &limits as *const _ as *const core::ffi::c_void,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            );
+            if ok == 0 {
+                CloseHandle(job);
+                return Err("SetInformationJobObject failed".into());
+            }
+            let ui = JOBOBJECT_BASIC_UI_RESTRICTIONS {
+                UIRestrictionsClass: JOB_OBJECT_UILIMIT_DESKTOP
+                    | JOB_OBJECT_UILIMIT_DISPLAYSETTINGS
+                    | JOB_OBJECT_UILIMIT_EXITWINDOWS
+                    | JOB_OBJECT_UILIMIT_GLOBALATOMS
+                    | JOB_OBJECT_UILIMIT_HANDLES
+                    | JOB_OBJECT_UILIMIT_READCLIPBOARD
+                    | JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS
+                    | JOB_OBJECT_UILIMIT_WRITECLIPBOARD,
+            };
+            SetInformationJobObject(
+                job,
+                JobObjectBasicUIRestrictions,
+                &ui as *const _ as *const core::ffi::c_void,
+                std::mem::size_of::<JOBOBJECT_BASIC_UI_RESTRICTIONS>() as u32,
+            );
+            if AssignProcessToJobObject(job, child.as_raw_handle() as HANDLE) == 0 {
+                CloseHandle(job);
+                return Err("AssignProcessToJobObject failed".into());
+            }
+            Ok(Job(job))
+        }
+    }
+}
+
 pub struct WorkerProc {
     child: Child,
     stdin: ChildStdin,
     rx: Receiver<Frame>,
     pub loaded: Option<(u64, LoadInfo)>,
     pub status: Option<SandboxStatus>,
+    #[cfg(windows)]
+    job: Option<job::Job>,
 }
 
 impl WorkerProc {
     pub fn spawn() -> Result<Self, WorkerError> {
         let exe = std::env::current_exe().map_err(|e| WorkerError::Spawn(e.to_string()))?;
-        let mut child = Command::new(exe)
-            .arg("--wasp-worker")
-            .env_clear()
+        let mut command = Command::new(exe);
+        command.arg("--wasp-worker").env_clear();
+        #[cfg(windows)]
+        for key in ["SystemRoot", "SystemDrive", "windir", "TEMP", "TMP"] {
+            if let Ok(value) = std::env::var(key) {
+                command.env(key, value);
+            }
+        }
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
             .map_err(|e| WorkerError::Spawn(e.to_string()))?;
+        #[cfg(windows)]
+        let job = match job::confine(&child) {
+            Ok(j) => Some(j),
+            Err(e) => {
+                log::warn!("worker job object not applied: {e}");
+                None
+            }
+        };
         let stdin = child.stdin.take().ok_or_else(|| WorkerError::Spawn("no stdin".into()))?;
         let stdout = child.stdout.take().ok_or_else(|| WorkerError::Spawn("no stdout".into()))?;
         let (tx, rx) = mpsc::channel();
@@ -95,7 +189,15 @@ impl WorkerProc {
                 let _ = tx.send(Frame::Eof);
             })
             .map_err(|e| WorkerError::Spawn(e.to_string()))?;
-        Ok(Self { child, stdin, rx, loaded: None, status: None })
+        Ok(Self {
+            child,
+            stdin,
+            rx,
+            loaded: None,
+            status: None,
+            #[cfg(windows)]
+            job,
+        })
     }
 
     pub fn request(&mut self, req: &Request, payload: &[u8], timeout: Duration) -> Result<Reply, WorkerError> {
@@ -298,8 +400,18 @@ impl Pool {
                 return Ok(s.clone());
             }
             let reply = w.request(&Request::Status, &[], Duration::from_secs(15))?;
-            let status: SandboxStatus =
+            #[allow(unused_mut)]
+            let mut status: SandboxStatus =
                 serde_json::from_value(reply.header.data).map_err(|e| WorkerError::Protocol(e.to_string()))?;
+            #[cfg(windows)]
+            {
+                let confined = w.job.is_some();
+                status.no_child_processes = confined;
+                status.memory_cap_mb = if confined { (job::MEMORY_CAP_BYTES / (1024 * 1024)) as u64 } else { 0 };
+                if !confined {
+                    status.notes.push("The worker could not be placed in a job object; memory and process limits are off.".into());
+                }
+            }
             w.status = Some(status.clone());
             Ok(status)
         })

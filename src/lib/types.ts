@@ -66,10 +66,12 @@ export interface OutlineItem {
 }
 
 export interface SandboxStatus {
+  platform: string;
   landlock: 'enforced' | 'partial' | 'unavailable';
   seccomp: boolean;
   network_isolated: boolean;
   no_new_privs: boolean;
+  no_child_processes: boolean;
   memory_cap_mb: number;
   fs_locked: boolean;
   notes: string[];
