@@ -43,7 +43,10 @@ export async function unlock(password: string): Promise<void> {
   const doc = app.doc;
   if (!doc) return;
   const info = await unlockDocument(doc.id, doc.path, password);
-  if (app.doc?.id !== doc.id) return;
+  if (app.doc?.id !== doc.id) {
+    closeDocument(info.id).catch(() => {});
+    return;
+  }
   app.doc = info;
   app.highlights = new Map();
   app.activeHighlight = null;
@@ -185,38 +188,43 @@ export async function startBatch(inputs: string[], source: string, known?: strin
     source,
     items: pdfs.map((path) => ({ path, name: basename(path), dir: dirname(path), status: 'queued' as const }))
   };
-  for (let i = 0; i < pdfs.length; i++) {
-    const batch = app.batch;
-    if (!batch || batch.id !== id || !batch.running) break;
-    batch.items[i].status = 'checking';
-    try {
-      const r = await checkFile(pdfs[i]);
+  try {
+    for (let i = 0; i < pdfs.length; i++) {
+      const batch = app.batch;
+      if (!batch || batch.id !== id || !batch.running) break;
+      batch.items[i].status = 'checking';
+      try {
+        const r = await checkFile(pdfs[i]);
+        const current = app.batch;
+        if (!current || current.id !== id) return;
+        const item = current.items[i];
+        item.status = 'done';
+        item.size = r.size;
+        item.pages = r.pages;
+        item.verdict = r.verdict;
+        item.findings = r.findings;
+        item.note = r.note;
+        item.needsPassword = r.needs_password;
+      } catch (e) {
+        const current = app.batch;
+        if (!current || current.id !== id) return;
+        current.items[i].status = 'failed';
+        current.items[i].error = errorText(e);
+      }
       const current = app.batch;
-      if (!current || current.id !== id) return;
-      const item = current.items[i];
-      item.status = 'done';
-      item.size = r.size;
-      item.pages = r.pages;
-      item.verdict = r.verdict;
-      item.findings = r.findings;
-      item.note = r.note;
-      item.needsPassword = r.needs_password;
-    } catch (e) {
-      const current = app.batch;
-      if (!current || current.id !== id) return;
-      current.items[i].status = 'failed';
-      current.items[i].error = errorText(e);
+      if (current && current.id === id) current.done = i + 1;
     }
+    const batch = app.batch;
+    if (batch && batch.id === id) {
+      batch.running = false;
+      batch.finishedAt = Date.now();
+      batch.items = sortBatch(batch.items);
+    }
+  } finally {
+    // A newer batch that is still running keeps the checker and releases it when it ends.
     const current = app.batch;
-    if (current && current.id === id) current.done = i + 1;
+    if (!current || current.id === id || !current.running) finishBatch().catch(() => {});
   }
-  const batch = app.batch;
-  if (batch && batch.id === id) {
-    batch.running = false;
-    batch.finishedAt = Date.now();
-    batch.items = sortBatch(batch.items);
-  }
-  finishBatch().catch(() => {});
 }
 
 const verdictRank: Record<string, number> = { hostile: 0, warning: 1, caution: 2, failed: 3, clean: 4 };

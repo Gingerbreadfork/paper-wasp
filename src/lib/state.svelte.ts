@@ -88,7 +88,7 @@ export class AppState {
     if (s.readingMode) this.readingMode = s.readingMode;
     if (s.panel !== undefined) this.panel = s.panel;
     if (s.fit) this.fit = s.fit;
-    if (typeof s.zoom === 'number' && s.zoom > 0) this.zoom = s.zoom;
+    if (typeof s.zoom === 'number' && s.zoom > 0) this.zoom = Math.min(8, Math.max(0.1, s.zoom));
     try {
       this.recents = loadRecents();
     } catch {

@@ -6,7 +6,9 @@ use host::{Doc, Pool};
 use protocol::{OutlineItem, PageSize, Request, SandboxStatus, ScanReport, TextLine};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use std::path::Path;
+use std::collections::HashSet;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -41,6 +43,21 @@ fn hex(bytes: &[u8]) -> String {
     s
 }
 
+fn display_name(path: &str) -> String {
+    Path::new(path)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string())
+}
+
+/// Reads the file, or returns `None` if it holds more than `MAX_FILE_BYTES`.
+/// The cap applies to the read itself because the file can grow after its size was checked.
+fn read_capped(path: &str, size_hint: u64) -> std::io::Result<Option<Vec<u8>>> {
+    let mut bytes = Vec::with_capacity(size_hint.min(MAX_FILE_BYTES) as usize);
+    std::fs::File::open(path)?.take(MAX_FILE_BYTES + 1).read_to_end(&mut bytes)?;
+    Ok((bytes.len() as u64 <= MAX_FILE_BYTES).then_some(bytes))
+}
+
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {
     tauri::async_runtime::spawn_blocking(f).await.map_err(|e| e.to_string())?
 }
@@ -64,19 +81,19 @@ async fn open_document(app: AppHandle, path: String) -> Result<DocInfo, String> 
         if meta.len() > MAX_FILE_BYTES {
             return Err("Files larger than 512 MB aren't supported.".into());
         }
-        let bytes = std::fs::read(&path).map_err(|e| format!("Couldn't read the file: {e}"))?;
+        let bytes = read_capped(&path, meta.len())
+            .map_err(|e| format!("Couldn't read the file: {e}"))?
+            .ok_or("Files larger than 512 MB aren't supported.")?;
+        let size = bytes.len() as u64;
         let sha256 = hex(&Sha256::digest(&bytes));
-        let name = Path::new(&path)
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "document.pdf".into());
+        let name = display_name(&path);
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         let doc = Arc::new(Doc { id, bytes: Arc::new(bytes), password: None });
         pool.set_document(Some(doc));
         let info = pool
-            .call(0, true, |w| Ok(w.loaded.as_ref().map(|(_, i)| i.clone()).unwrap_or_default()))
+            .call(0, Some(id), |w| Ok(w.loaded.as_ref().map(|(_, i)| i.clone()).unwrap_or_default()))
             .map_err(|e| e.to_string())?;
-        Ok(DocInfo { id, name, path, size: meta.len(), sha256, pages: info.pages, render_error: info.render_error, needs_password: info.needs_password })
+        Ok(DocInfo { id, name, path, size, sha256, pages: info.pages, render_error: info.render_error, needs_password: info.needs_password })
     })
     .await
 }
@@ -90,9 +107,15 @@ struct Expanded {
 
 const MAX_BATCH_FILES: usize = 5000;
 
-fn walk_pdfs(dir: &Path, depth: usize, out: &mut Vec<String>, skipped: &mut usize) {
+fn walk_pdfs(dir: &Path, depth: usize, visited: &mut HashSet<PathBuf>, out: &mut Vec<String>, skipped: &mut usize) {
     if depth > 16 || out.len() >= MAX_BATCH_FILES {
         return;
+    }
+    // Symlinks are followed, so each real directory is walked once to avoid loops.
+    if let Ok(real) = std::fs::canonicalize(dir) {
+        if !visited.insert(real) {
+            return;
+        }
     }
     let Ok(entries) = std::fs::read_dir(dir) else {
         *skipped += 1;
@@ -105,11 +128,14 @@ fn walk_pdfs(dir: &Path, depth: usize, out: &mut Vec<String>, skipped: &mut usiz
         if name.to_string_lossy().starts_with('.') {
             continue;
         }
-        let Ok(kind) = entry.file_type() else { continue };
         let path = entry.path();
-        if kind.is_dir() {
-            walk_pdfs(&path, depth + 1, out, skipped);
-        } else if kind.is_file() && is_pdf(&path) {
+        let Ok(meta) = std::fs::metadata(&path) else {
+            *skipped += 1;
+            continue;
+        };
+        if meta.is_dir() {
+            walk_pdfs(&path, depth + 1, visited, out, skipped);
+        } else if meta.is_file() && is_pdf(&path) {
             if out.len() >= MAX_BATCH_FILES {
                 *skipped += 1;
             } else {
@@ -129,18 +155,20 @@ async fn expand_paths(paths: Vec<String>) -> Result<Expanded, String> {
         let mut pdfs = Vec::new();
         let mut had_directory = false;
         let mut skipped = 0;
+        let mut visited = HashSet::new();
         for p in &paths {
             let path = Path::new(p);
             if path.is_dir() {
                 had_directory = true;
-                walk_pdfs(path, 0, &mut pdfs, &mut skipped);
+                walk_pdfs(path, 0, &mut visited, &mut pdfs, &mut skipped);
             } else if path.is_file() {
                 pdfs.push(p.clone());
             } else {
                 skipped += 1;
             }
         }
-        pdfs.dedup();
+        let mut seen = HashSet::new();
+        pdfs.retain(|p| seen.insert(p.clone()));
         Ok(Expanded { pdfs, had_directory, skipped })
     })
     .await
@@ -179,17 +207,16 @@ async fn check_file(app: AppHandle, path: String) -> Result<CheckResult, String>
         if meta.len() > MAX_FILE_BYTES {
             return Err("Larger than 512 MB, skipped.".into());
         }
-        let bytes = std::fs::read(&path).map_err(|e| format!("Couldn't read the file: {e}"))?;
+        let bytes = read_capped(&path, meta.len())
+            .map_err(|e| format!("Couldn't read the file: {e}"))?
+            .ok_or("Larger than 512 MB, skipped.")?;
         let sha256 = hex(&Sha256::digest(&bytes));
-        let name = Path::new(&path)
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.clone());
+        let name = display_name(&path);
         let (info, report) = pool.check(&bytes).map_err(|e| e.to_string())?;
         Ok(CheckResult {
             path,
             name,
-            size: meta.len(),
+            size: bytes.len() as u64,
             pages: info.pages.len(),
             sha256,
             verdict: report.verdict.clone(),
@@ -224,17 +251,24 @@ async fn unlock_document(app: AppHandle, id: u64, path: String, password: String
         let new_id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         let doc = Arc::new(Doc { id: new_id, bytes: previous.bytes.clone(), password: Some(password) });
         pool.set_document(Some(doc));
-        let info = pool
-            .call(0, true, |w| Ok(w.loaded.as_ref().map(|(_, i)| i.clone()).unwrap_or_default()))
-            .map_err(|e| e.to_string())?;
-        if info.needs_password {
-            pool.set_document(Some(previous));
-            return Err(info.render_error.unwrap_or_else(|| "That password didn't unlock the file.".into()));
-        }
-        let name = Path::new(&path)
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.clone());
+        let loaded = pool
+            .call(0, Some(new_id), |w| Ok(w.loaded.as_ref().map(|(_, i)| i.clone()).unwrap_or_default()))
+            .map_err(|e| e.to_string())
+            .and_then(|info| {
+                if info.needs_password {
+                    Err(info.render_error.unwrap_or_else(|| "That password didn't unlock the file.".into()))
+                } else {
+                    Ok(info)
+                }
+            });
+        let info = match loaded {
+            Ok(info) => info,
+            Err(e) => {
+                pool.replace_if_current(new_id, Some(previous));
+                return Err(e);
+            }
+        };
+        let name = display_name(&path);
         let size = previous.bytes.len() as u64;
         let sha256 = hex(&Sha256::digest(previous.bytes.as_slice()));
         Ok(DocInfo { id: new_id, name, path, size, sha256, pages: info.pages, render_error: info.render_error, needs_password: false })
@@ -261,7 +295,7 @@ async fn scan_document(app: AppHandle, id: u64) -> Result<ScanReport, String> {
     blocking(move || {
         current_doc(&pool, id)?;
         let reply = pool
-            .call(1, true, |w| w.request(&Request::Scan, &[], Duration::from_secs(180)))
+            .call(1, Some(id), |w| w.request(&Request::Scan, &[], Duration::from_secs(180)))
             .map_err(|e| e.to_string())?;
         serde_json::from_value(reply.header.data).map_err(|e| e.to_string())
     })
@@ -274,7 +308,7 @@ async fn document_outline(app: AppHandle, id: u64) -> Result<Vec<OutlineItem>, S
     blocking(move || {
         current_doc(&pool, id)?;
         let reply = pool
-            .call(1, true, |w| w.request(&Request::Outline, &[], Duration::from_secs(60)))
+            .call(1, Some(id), |w| w.request(&Request::Outline, &[], Duration::from_secs(60)))
             .map_err(|e| e.to_string())?;
         serde_json::from_value(reply.header.data).map_err(|e| e.to_string())
     })
@@ -287,7 +321,7 @@ async fn page_text(app: AppHandle, id: u64, page: usize) -> Result<Vec<TextLine>
     blocking(move || {
         current_doc(&pool, id)?;
         let reply = pool
-            .call(1, true, |w| w.request(&Request::Text { page }, &[], Duration::from_secs(60)))
+            .call(1, Some(id), |w| w.request(&Request::Text { page }, &[], Duration::from_secs(60)))
             .map_err(|e| e.to_string())?;
         serde_json::from_value(reply.header.data).map_err(|e| e.to_string())
     })
@@ -342,7 +376,9 @@ fn dev_drive_poll() -> Vec<serde_json::Value> {
 
 #[tauri::command]
 fn home_dir() -> Option<String> {
-    std::env::var("HOME").ok().filter(|h| !h.is_empty())
+    ["HOME", "USERPROFILE"]
+        .into_iter()
+        .find_map(|key| std::env::var(key).ok().filter(|h| !h.is_empty()))
 }
 
 #[tauri::command]
@@ -356,7 +392,7 @@ fn parse_query(query: Option<&str>) -> (f32, bool) {
     for pair in query.unwrap_or("").split('&') {
         let mut it = pair.splitn(2, '=');
         match (it.next(), it.next()) {
-            (Some("s"), Some(v)) => scale = v.parse().unwrap_or(1.0),
+            (Some("s"), Some(v)) => scale = v.parse::<f32>().ok().filter(|v| v.is_finite()).unwrap_or(1.0),
             (Some("t"), Some(v)) => thumb = v == "1",
             _ => {}
         }
@@ -374,7 +410,7 @@ fn serve_page(pool: &Pool, path: &str, query: Option<&str>) -> Result<Vec<u8>, (
     let (scale, thumb) = parse_query(query);
     current_doc(pool, id).map_err(|e| (StatusCode::NOT_FOUND, e))?;
     let reply = pool
-        .call(if thumb { 1 } else { 0 }, true, |w| w.request(&Request::Render { page, scale }, &[], Duration::from_secs(90)))
+        .call(if thumb { 1 } else { 0 }, Some(id), |w| w.request(&Request::Render { page, scale }, &[], Duration::from_secs(90)))
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(reply.payload)
 }
@@ -387,7 +423,8 @@ pub fn run() {
 
     let launch = std::env::args()
         .skip(1)
-        .find(|a| !a.starts_with("--") && Path::new(a).is_file());
+        .find(|a| !a.starts_with("--") && Path::new(a).is_file())
+        .map(|a| std::path::absolute(&a).map(|p| p.to_string_lossy().into_owned()).unwrap_or(a));
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -410,7 +447,7 @@ pub fn run() {
                     Ok(png) => Response::builder()
                         .status(StatusCode::OK)
                         .header("Content-Type", "image/png")
-                        .header("Cache-Control", "private, max-age=86400")
+                        .header("Cache-Control", "no-store")
                         .header("Access-Control-Allow-Origin", "*")
                         .body(png)
                         .unwrap(),

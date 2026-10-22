@@ -3,7 +3,7 @@
 use crate::protocol::TextLine;
 use hayro::hayro_interpret::font::{Glyph, GlyphRun};
 use hayro::hayro_interpret::hayro_syntax::Pdf;
-use hayro::hayro_interpret::util::{RectExt, TransformExt};
+use hayro::hayro_interpret::util::TransformExt;
 use hayro::hayro_interpret::{
     interpret_page, BlendMode, ClipPath, Context, Device, DrawMode, DrawProps, Image,
     ImageDrawProps, InterpreterCache, InterpreterSettings, SoftMask,
@@ -73,7 +73,6 @@ pub fn page_text<'a>(
     );
     let mut device = TextDevice::default();
     interpret_page(page, &mut ctx, &mut device);
-    let _ = page.intersected_crop_box().to_kurbo();
     Ok(group_lines(device.boxes))
 }
 

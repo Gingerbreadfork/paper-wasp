@@ -106,7 +106,10 @@ fn raw_scan(data: &[u8]) -> Raw {
     if data.starts_with(b"\x7fELF") {
         raw.polyglot.push("Linux executable header (ELF)".into());
     }
-    if memmem::find(data, b"PK\x03\x04").is_some() && memmem::rfind(data, b"PK\x05\x06").is_some() {
+    // ZIP readers look for the end-of-central-directory record only in the file's last 64 KiB + 22 bytes.
+    let zip_tail = &data[data.len().saturating_sub(65_535 + 22)..];
+    let zip_at_end = memmem::find(zip_tail, b"PK\x05\x06").is_some() && memmem::find(data, b"PK\x03\x04").is_some();
+    if data.starts_with(b"PK\x03\x04") || zip_at_end {
         raw.polyglot.push("ZIP archive structure".into());
     }
     let lower_head: Vec<u8> = head.iter().map(|b| b.to_ascii_lowercase()).collect();
@@ -226,17 +229,6 @@ fn filespec_name(doc: &Document, obj: &Object) -> Option<String> {
     }
 }
 
-fn js_snippet(doc: &Document, obj: &Object) -> Option<String> {
-    match deref(doc, obj)? {
-        Object::String(b, _) => Some(clean_text(&pdf_string(b), SNIPPET)),
-        Object::Stream(s) => {
-            let content = s.decompressed_content_with_limit(64 * 1024).ok()?;
-            Some(clean_text(&String::from_utf8_lossy(&content), SNIPPET))
-        }
-        _ => None,
-    }
-}
-
 const JS_TEXT_CAP: usize = 512 * 1024;
 
 fn js_full(doc: &Document, obj: &Object) -> Option<String> {
@@ -265,20 +257,23 @@ fn note_js(st: &mut Structure, doc: &Document, d: &Dictionary) {
         return;
     }
     let Ok(js) = d.get(b"JS") else { return };
-    if st.js_snippets.len() < 3 {
-        if let Some(snip) = js_snippet(doc, js) {
-            if !snip.trim().is_empty() {
-                st.js_snippets.push(snip);
-            }
+    let want_snippet = st.js_snippets.len() < 3;
+    let want_text = st.js_text.len() < JS_TEXT_CAP;
+    if !want_snippet && !want_text {
+        return;
+    }
+    let Some(full) = js_full(doc, js) else { return };
+    if want_snippet {
+        let snip = clean_text(&full, SNIPPET);
+        if !snip.trim().is_empty() {
+            st.js_snippets.push(snip);
         }
     }
-    if st.js_text.len() < JS_TEXT_CAP {
-        if let Some(full) = js_full(doc, js) {
-            let room = JS_TEXT_CAP - st.js_text.len();
-            let take: String = full.chars().take(room).collect();
-            st.js_text.push_str(&take);
-            st.js_text.push('\n');
-        }
+    if want_text {
+        let room = JS_TEXT_CAP - st.js_text.len();
+        let take: String = full.chars().take(room).collect();
+        st.js_text.push_str(&take);
+        st.js_text.push('\n');
     }
 }
 
@@ -665,13 +660,13 @@ fn structural_scan(doc: &Document, locked: bool, encrypted: bool) -> Structure {
 
     let mut merged: Vec<Link> = Vec::new();
     let mut seen: HashSet<(Option<usize>, String)> = HashSet::new();
+    let mut seen_targets: HashSet<String> = HashSet::new();
     for l in page_links.into_iter().chain(st.links.drain(..)) {
-        if l.kind == "uri" {
-            if seen.iter().any(|(_, t)| t == &l.target) && l.page.is_none() {
-                continue;
-            }
+        if l.kind == "uri" && l.page.is_none() && seen_targets.contains(&l.target) {
+            continue;
         }
         if seen.insert((l.page, l.target.clone())) {
+            seen_targets.insert(l.target.clone());
             merged.push(l);
         }
     }
@@ -726,7 +721,8 @@ pub fn scan(data: &[u8], doc: Option<&Document>, page_count: usize, locked: bool
         f.push(finding("polyglot", "critical", "Looks like more than one file type", "Besides PDF, the bytes also form another valid file format. Polyglot files are a classic way to smuggle executables past filters.", raw.polyglot.len(), raw.polyglot.clone()));
     }
 
-    let js_count = structure.as_ref().map(|s| s.js).unwrap_or(0).max(count("JS")).max(count("JavaScript"));
+    let raw_js = count("JS").max(count("JavaScript"));
+    let js_count = structure.as_ref().map(|s| s.js).unwrap_or(raw_js);
     let open_action = structure.as_ref().map(|s| s.open_action.is_some()).unwrap_or(count("OpenAction") > 0);
     let has_aa = structure.as_ref().map(|s| s.aa > 0).unwrap_or(count("AA") > 0);
     let launch_count = structure.as_ref().map(|s| s.launch.len()).unwrap_or(count("Launch"));
@@ -751,6 +747,9 @@ pub fn scan(data: &[u8], doc: Option<&Document>, page_count: usize, locked: bool
         } else {
             f.push(finding("javascript", "medium", "Contains JavaScript", "Code that a conventional reader could run when you interact with the document. Paper Wasp has no script engine, so it never runs here.", js_count, evidence));
         }
+    }
+    if js_count == 0 && raw_js > 0 {
+        f.push(finding("js_unconfirmed", "low", "Unconfirmed JavaScript keyword", "The byte scan found a JavaScript keyword that the object walk couldn't tie to any script. It is often text on a page or a leftover from an earlier save.", raw_js, vec![]));
     }
     if launch_count > 0 {
         let evidence = structure.as_ref().map(|s| s.launch.clone()).unwrap_or_default();
@@ -841,11 +840,18 @@ pub fn scan(data: &[u8], doc: Option<&Document>, page_count: usize, locked: bool
         }
     }
 
-    let encrypted = structure.as_ref().map(|s| s.encrypted).unwrap_or(false) || count("Encrypt") > 0;
+    let encrypted = structure.as_ref().map(|s| s.encrypted).unwrap_or(false) || count("Encrypt") > 0 || locked;
     if encrypted && locked {
-        f.push(finding("locked", "low", "Password-protected", "The contents are encrypted until the file is unlocked, so scripts and text inside can't be read yet. The structure was still inspected.", 1, vec![]));
-    } else if encrypted {
+        let detail = if structure.is_some() {
+            "The contents are encrypted until the file is unlocked, so scripts and text inside can't be read yet. The structure was still inspected."
+        } else {
+            "The contents are encrypted until the file is unlocked, so they couldn't be inspected yet."
+        };
+        f.push(finding("locked", "low", "Password-protected", detail, 1, vec![]));
+    } else if encrypted && structure.is_some() {
         f.push(finding("encrypted", "info", "Encrypted", "The file is encrypted and was unlocked for reading. Everything inside was inspected.", 1, vec![]));
+    } else if encrypted {
+        f.push(finding("encrypted", "info", "Encrypted", "The file is encrypted and its structure couldn't be parsed, so the contents couldn't be inspected.", 1, vec![]));
     }
     if !raw.obfuscated.is_empty() {
         let evidence: Vec<String> = raw.obfuscated.iter().map(|(k, n)| format!("/{k} written with hex escapes ×{n}")).collect();

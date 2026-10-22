@@ -31,8 +31,9 @@ export function loadRecents(): RecentEntry[] {
 }
 
 export function rememberRecent(entry: Omit<RecentEntry, 'openedAt'> & { openedAt?: number }): RecentEntry[] {
-  const list = read().filter((r) => r.path !== entry.path);
-  const prev = read().find((r) => r.path === entry.path);
+  const all = read();
+  const prev = all.find((r) => r.path === entry.path);
+  const list = all.filter((r) => r.path !== entry.path);
   const merged: RecentEntry = {
     ...prev,
     ...entry,

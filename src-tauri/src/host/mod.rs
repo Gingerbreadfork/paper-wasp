@@ -8,6 +8,10 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::time::Duration;
 
+// Limits on a reply's header line and payload, well above any legitimate reply.
+const MAX_HEADER_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_PAYLOAD_BYTES: usize = 512 * 1024 * 1024;
+
 #[derive(Debug)]
 pub enum WorkerError {
     Spawn(String),
@@ -65,14 +69,17 @@ mod job {
 
     pub const MEMORY_CAP_BYTES: usize = 2 * 1024 * 1024 * 1024;
 
-    pub struct Job(HANDLE);
+    pub struct Job {
+        handle: HANDLE,
+        pub ui_restricted: bool,
+    }
 
     unsafe impl Send for Job {}
 
     impl Drop for Job {
         fn drop(&mut self) {
             unsafe {
-                CloseHandle(self.0);
+                CloseHandle(self.handle);
             }
         }
     }
@@ -110,17 +117,20 @@ mod job {
                     | JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS
                     | JOB_OBJECT_UILIMIT_WRITECLIPBOARD,
             };
-            SetInformationJobObject(
+            let ui_restricted = SetInformationJobObject(
                 job,
                 JobObjectBasicUIRestrictions,
                 &ui as *const _ as *const core::ffi::c_void,
                 std::mem::size_of::<JOBOBJECT_BASIC_UI_RESTRICTIONS>() as u32,
-            );
+            ) != 0;
+            if !ui_restricted {
+                log::warn!("worker job object UI restrictions not applied");
+            }
             if AssignProcessToJobObject(job, child.as_raw_handle() as HANDLE) == 0 {
                 CloseHandle(job);
                 return Err("AssignProcessToJobObject failed".into());
             }
-            Ok(Job(job))
+            Ok(Job { handle: job, ui_restricted })
         }
     }
 }
@@ -168,16 +178,23 @@ impl WorkerProc {
             .spawn(move || {
                 let mut reader = BufReader::with_capacity(1 << 20, stdout);
                 let mut line = String::new();
+                // Any framing error ends the stream, so the pool kills and replaces the worker.
                 loop {
                     line.clear();
-                    match reader.read_line(&mut line) {
+                    match (&mut reader).take(MAX_HEADER_BYTES).read_line(&mut line) {
                         Ok(0) | Err(_) => break,
                         Ok(_) => {}
+                    }
+                    if !line.ends_with('\n') {
+                        break;
                     }
                     let header: ReplyHeader = match serde_json::from_str(line.trim_end()) {
                         Ok(h) => h,
                         Err(_) => break,
                     };
+                    if header.len > MAX_PAYLOAD_BYTES {
+                        break;
+                    }
                     let mut payload = vec![0u8; header.len];
                     if header.len > 0 && reader.read_exact(&mut payload).is_err() {
                         break;
@@ -272,6 +289,14 @@ impl Pool {
         self.current.read().unwrap_or_else(|p| p.into_inner()).clone()
     }
 
+    /// Swaps in `doc` only while `expected` is still current, so a newer open is never overwritten.
+    pub fn replace_if_current(&self, expected: u64, doc: Option<Arc<Doc>>) {
+        let mut current = self.current.write().unwrap_or_else(|p| p.into_inner());
+        if current.as_ref().map(|d| d.id) == Some(expected) {
+            *current = doc;
+        }
+    }
+
     pub fn release_workers(&self) {
         for slot in &self.slots {
             if let Ok(mut g) = slot.try_lock() {
@@ -294,16 +319,18 @@ impl Pool {
         self.slots[prefer % n].lock().unwrap_or_else(|p| p.into_inner())
     }
 
+    /// Runs `f` on a worker. When `doc_id` is given, that document is loaded first, and the
+    /// call fails with `NoDocument` if it is no longer the current one.
     pub fn call<T>(
         &self,
         prefer: usize,
-        need_doc: bool,
+        doc_id: Option<u64>,
         f: impl Fn(&mut WorkerProc) -> Result<T, WorkerError>,
     ) -> Result<T, WorkerError> {
         let mut guard = self.acquire(prefer);
         let mut last = None;
         for attempt in 0..2 {
-            match self.call_once(&mut guard, need_doc, &f) {
+            match self.call_once(&mut guard, doc_id, &f) {
                 Err(WorkerError::Dead(msg)) if attempt == 0 => {
                     log::warn!("sandbox worker died ({msg}); starting a fresh one");
                     last = Some(WorkerError::Dead(msg));
@@ -317,14 +344,14 @@ impl Pool {
     fn call_once<T>(
         &self,
         guard: &mut MutexGuard<'_, Option<WorkerProc>>,
-        need_doc: bool,
+        doc_id: Option<u64>,
         f: &impl Fn(&mut WorkerProc) -> Result<T, WorkerError>,
     ) -> Result<T, WorkerError> {
         if guard.is_none() {
             **guard = Some(WorkerProc::spawn()?);
         }
-        if need_doc {
-            let doc = self.current().ok_or(WorkerError::NoDocument)?;
+        if let Some(expected) = doc_id {
+            let doc = self.current().filter(|d| d.id == expected).ok_or(WorkerError::NoDocument)?;
             let worker = guard.as_mut().expect("worker present");
             if worker.loaded.as_ref().map(|(id, _)| *id) != Some(doc.id) {
                 let load = worker.request(&Request::Load { len: doc.bytes.len(), password: doc.password.clone() }, &doc.bytes, Duration::from_secs(180));
@@ -395,7 +422,7 @@ impl Pool {
     }
 
     pub fn sandbox_status(&self) -> Result<SandboxStatus, WorkerError> {
-        self.call(0, false, |w| {
+        self.call(0, None, |w| {
             if let Some(s) = &w.status {
                 return Ok(s.clone());
             }
@@ -410,6 +437,9 @@ impl Pool {
                 status.memory_cap_mb = if confined { (job::MEMORY_CAP_BYTES / (1024 * 1024)) as u64 } else { 0 };
                 if !confined {
                     status.notes.push("The worker could not be placed in a job object; memory and process limits are off.".into());
+                }
+                if w.job.as_ref().is_some_and(|j| !j.ui_restricted) {
+                    status.notes.push("The worker's desktop and clipboard restrictions could not be applied.".into());
                 }
             }
             w.status = Some(status.clone());

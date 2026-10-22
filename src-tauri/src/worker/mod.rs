@@ -202,7 +202,7 @@ pub fn run() -> ! {
                 },
                 Request::Scan => {
                     let parsed = structure.get_or_insert_with(|| parse_lopdf(&data, &password));
-                    let (locked, encrypted) = (parsed.locked, parsed.encrypted);
+                    let (locked, encrypted) = (parsed.locked || needs_password, parsed.encrypted);
                     let page_count = info.pages.len();
                     let result = catch_unwind(AssertUnwindSafe(|| scan::scan(&data, parsed.doc.as_ref(), page_count, locked, encrypted)));
                     match result {

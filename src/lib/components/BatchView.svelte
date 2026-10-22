@@ -50,12 +50,14 @@
     return [...parts, ...shown].join(', ');
   }
 
-  const folderMode = $derived(batch.source.startsWith('/'));
+  const folderMode = $derived(/^([\\/]|[A-Za-z]:[\\/])/.test(batch.source));
+  const sourceDir = $derived(batch.source.replace(/[\\/]+$/, ''));
   function where(it: BatchItem): string {
     if (!folderMode) return prettyPath(it.dir);
-    if (it.dir === batch.source) return '';
-    const prefix = batch.source.endsWith('/') ? batch.source : batch.source + '/';
-    return it.dir.startsWith(prefix) ? it.dir.slice(prefix.length) + '/' : prettyPath(it.dir);
+    if (it.dir === batch.source || it.dir === sourceDir) return '';
+    const rest = it.dir.slice(sourceDir.length);
+    const sep = rest.charAt(0);
+    return it.dir.startsWith(sourceDir) && (sep === '/' || sep === '\\') ? rest.slice(1) + sep : prettyPath(it.dir);
   }
 
   function badgeStatus(it: BatchItem) {

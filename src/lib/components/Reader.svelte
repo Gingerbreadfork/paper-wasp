@@ -4,7 +4,7 @@
   import { on } from 'svelte/events';
   import { app } from '../state.svelte';
   import { rememberPage } from '../session';
-  import type { DocInfo, Rect } from '../types';
+  import type { DocInfo, PageSize, Rect } from '../types';
   import PageView from './PageView.svelte';
   import Rail from './Rail.svelte';
   import HostileBanner from './HostileBanner.svelte';
@@ -26,6 +26,14 @@
   let viewportW = $state(0);
   let viewportH = $state(0);
   let scrollTop = $state(0);
+
+  $effect(() => {
+    const el = scroller;
+    app.scroller = el;
+    return () => {
+      if (app.scroller === el) app.scroller = null;
+    };
+  });
 
   const rotated = $derived(
     doc.pages.map((p) => (app.rotation % 180 === 0 ? p : { width: p.height, height: p.width }))
@@ -121,6 +129,20 @@
     };
   };
 
+  // Top edge of an unrotated page rect once the page is turned clockwise by app.rotation.
+  function rotatedTop(r: Rect, page: PageSize): number {
+    switch (((app.rotation % 360) + 360) % 360) {
+      case 90:
+        return r.x;
+      case 180:
+        return page.height - r.y - r.h;
+      case 270:
+        return page.width - r.x - r.w;
+      default:
+        return r.y;
+    }
+  }
+
   let prevPx = untrack(() => pxPerPt);
   let prevHeight = untrack(() => layout.height);
   $effect(() => {
@@ -145,8 +167,9 @@
     if (!req || !el || viewportW === 0) return;
     untrack(() => {
       const base = layout.tops[req.page] ?? 0;
+      const page = doc.pages[req.page];
       let y = base - GAP / 2;
-      if (req.rect) y = base + req.rect.y * pxPerPt - viewportH * 0.38;
+      if (req.rect && page) y = base + rotatedTop(req.rect, page) * pxPerPt - viewportH * 0.38;
       const far = Math.abs(el.scrollTop - y) > viewportH * 2.5;
       el.scrollTo({ top: Math.max(0, y), behavior: far ? 'auto' : 'smooth' });
       if (app.page !== req.page) app.page = req.page;

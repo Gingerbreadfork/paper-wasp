@@ -46,10 +46,12 @@ export function dirname(path: string): string {
 let home = '';
 
 export function setHomeDir(dir: string | null | undefined) {
-  home = dir ? dir.replace(/\/+$/, '') : '';
+  home = dir ? dir.replace(/[\\/]+$/, '') : '';
 }
 
 export function prettyPath(path: string): string {
-  if (home && (path === home || path.startsWith(home + '/'))) return '~' + path.slice(home.length);
+  if (home && (path === home || path.startsWith(home + '/') || path.startsWith(home + '\\'))) {
+    return '~' + path.slice(home.length);
+  }
   return path;
 }

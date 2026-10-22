@@ -15,7 +15,10 @@
     "core:window:allow-set-title",
     "core:webview:allow-internal-toggle-devtools",
     "dialog:allow-open",
-    "opener:allow-open-url",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [{ "url": "https://*" }, { "url": "http://*" }, { "url": "mailto:*" }]
+    },
     "clipboard-manager:allow-write-text"
   ]
 }

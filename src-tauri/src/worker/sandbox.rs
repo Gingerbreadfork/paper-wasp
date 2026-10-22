@@ -12,18 +12,21 @@ pub fn lock_down() -> SandboxStatus {
 
     st.network_isolated = unshare_namespaces(&mut st.notes);
     st.memory_cap_mb = apply_rlimits(&mut st.notes);
+    if st.network_isolated {
+        limit_tasks(&mut st.notes);
+    }
     st.no_new_privs = unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0 };
     apply_landlock(&mut st);
-    st.seccomp = apply_seccomp(&mut st.notes);
-    st.no_child_processes = st.seccomp;
+    let (seccomp, no_spawn) = apply_seccomp(&mut st.notes);
+    st.seccomp = seccomp;
+    st.no_child_processes = no_spawn;
     st
 }
 
 #[cfg(not(target_os = "linux"))]
 pub fn lock_down() -> SandboxStatus {
-    let platform = if cfg!(windows) { "windows" } else { std::env::consts::OS };
     SandboxStatus {
-        platform: platform.into(),
+        platform: std::env::consts::OS.into(),
         landlock: "unavailable".into(),
         notes: if cfg!(windows) {
             vec!["File and network isolation are not available on Windows yet.".into()]
@@ -49,8 +52,8 @@ fn unshare_namespaces(notes: &mut Vec<String>) -> bool {
 fn apply_rlimits(notes: &mut Vec<String>) -> u64 {
     const GIB: u64 = 1024 * 1024 * 1024;
     let data_cap = 2 * GIB;
-    let mut ok = true;
-    ok &= set_limit(libc::RLIMIT_DATA, data_cap);
+    let data_capped = set_limit(libc::RLIMIT_DATA, data_cap);
+    let mut ok = data_capped;
     ok &= set_limit(libc::RLIMIT_AS, 6 * GIB);
     ok &= set_limit(libc::RLIMIT_FSIZE, 0);
     ok &= set_limit(libc::RLIMIT_CORE, 0);
@@ -58,7 +61,28 @@ fn apply_rlimits(notes: &mut Vec<String>) -> u64 {
     if !ok {
         notes.push("Some resource limits could not be applied.".into());
     }
-    data_cap / (1024 * 1024)
+    if data_capped {
+        data_cap / (1024 * 1024)
+    } else {
+        0
+    }
+}
+
+/// Caps the worker's task count with room for its thread pool.
+/// Only called inside the worker's own user namespace, where the count covers just this process.
+#[cfg(target_os = "linux")]
+fn limit_tasks(notes: &mut Vec<String>) {
+    let cpus = unsafe {
+        let mut set: libc::cpu_set_t = std::mem::zeroed();
+        if libc::sched_getaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &mut set) == 0 {
+            libc::CPU_COUNT(&set).max(1) as u64
+        } else {
+            std::thread::available_parallelism().map_or(1, |n| n.get()) as u64
+        }
+    };
+    if !set_limit(libc::RLIMIT_NPROC, cpus + 16) {
+        notes.push("The process count limit could not be applied.".into());
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -104,9 +128,10 @@ fn apply_landlock(st: &mut SandboxStatus) {
     }
 }
 
+/// Installs the syscall filter and returns whether it applied and whether new processes are blocked.
 #[cfg(target_os = "linux")]
-fn apply_seccomp(notes: &mut Vec<String>) -> bool {
-    use seccompiler::{BpfProgram, SeccompAction, SeccompFilter, SeccompRule, TargetArch};
+fn apply_seccomp(notes: &mut Vec<String>) -> (bool, bool) {
+    use seccompiler::{SeccompCmpArgLen, SeccompCmpOp, SeccompCondition, SeccompRule, TargetArch};
     use std::collections::BTreeMap;
 
     #[cfg(target_arch = "x86_64")]
@@ -116,7 +141,7 @@ fn apply_seccomp(notes: &mut Vec<String>) -> bool {
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
         notes.push("seccomp filter not built for this architecture.".into());
-        return false;
+        return (false, false);
     }
 
     let mut denied: Vec<i64> = vec![
@@ -174,13 +199,39 @@ fn apply_seccomp(notes: &mut Vec<String>) -> bool {
         libc::SYS_mknod,
     ]);
 
-    let rules: BTreeMap<i64, Vec<SeccompRule>> = denied.into_iter().map(|nr| (nr, Vec::new())).collect();
-    let filter = match SeccompFilter::new(
-        rules,
-        SeccompAction::Allow,
-        SeccompAction::Errno(libc::EPERM as u32),
-        arch,
-    ) {
+    let mut rules: BTreeMap<i64, Vec<SeccompRule>> = denied.into_iter().map(|nr| (nr, Vec::new())).collect();
+    // fork and posix_spawn both reach the kernel through clone, so only thread creation is allowed.
+    let not_thread = SeccompCondition::new(0, SeccompCmpArgLen::Qword, SeccompCmpOp::MaskedEq(libc::CLONE_THREAD as u64), 0)
+        .and_then(|c| SeccompRule::new(vec![c]));
+    let clone_denied = match not_thread {
+        Ok(rule) => {
+            rules.insert(libc::SYS_clone, vec![rule]);
+            true
+        }
+        Err(e) => {
+            notes.push(format!("seccomp clone rule rejected: {e}"));
+            false
+        }
+    };
+    if !install_filter(rules, libc::EPERM, arch, notes) {
+        return (false, false);
+    }
+    // clone3 passes its flags by pointer, out of the filter's reach.
+    // ENOSYS makes glibc fall back to clone, where the rule above applies.
+    let clone3_denied = install_filter(BTreeMap::from([(libc::SYS_clone3, Vec::new())]), libc::ENOSYS, arch, notes);
+    (true, clone_denied && clone3_denied)
+}
+
+#[cfg(target_os = "linux")]
+fn install_filter(
+    rules: std::collections::BTreeMap<i64, Vec<seccompiler::SeccompRule>>,
+    errno: i32,
+    arch: seccompiler::TargetArch,
+    notes: &mut Vec<String>,
+) -> bool {
+    use seccompiler::{BpfProgram, SeccompAction, SeccompFilter};
+
+    let filter = match SeccompFilter::new(rules, SeccompAction::Allow, SeccompAction::Errno(errno as u32), arch) {
         Ok(f) => f,
         Err(e) => {
             notes.push(format!("seccomp filter rejected: {e}"));
